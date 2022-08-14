@@ -435,6 +435,214 @@ def upper_confidence_bound(model, obj, jitter=1e-2, delta=0.5):
     
     return mean + beta * stdev
 
+
+def lower_confidence_bound(model, obj, jitter=1e-2, delta=0.5):
+    """Computes upper confidence bound.
+
+    Parameters
+    ----------
+    model : edbo.models
+        Trained model.
+    obj : edbo.objective
+        Objective object containing information about the domain.
+    jitter : float
+        Parameter which controls the degree of exploration.
+    delta : float
+        UCB parameter value.
+
+    Returns
+    ----------
+    numpy.array
+        Computed UCB at each domain point.
+    """
+
+    # Domain
+    domain = to_torch(obj.domain, gpu=obj.gpu)
+
+    # Mean and standard deviation
+    mean = model.predict(domain)
+    stdev = np.sqrt(model.variance(domain)) + 1e-6
+
+    # PI parameter values
+    dim = len(obj.domain.columns.values)
+    iters = len(obj.results)
+    beta = np.sqrt(2 * np.log(dim * iters ** 2 * math.pi ** 2 / (6 * delta)))
+
+    return mean - beta * stdev
+
+def multi_obj_acq(model, obj, jitter=1e-2, delta=0.5):
+    domain = to_torch(obj.domain, gpu=obj.gpu)
+    if len(obj.results) == 0:
+        max_observed = 0
+    else:
+        max_observed = obj.results.sort_values(obj.target).iloc[-1]
+        max_observed = max_observed[obj.target]
+    mean = model.predict(domain)
+    stdev = np.sqrt(model.variance(domain)) + 1e-6
+
+    z = (mean - max_observed - jitter) / stdev
+    imp = mean - max_observed - jitter
+    ei = imp * norm.cdf(z) + stdev * norm.pdf(z)
+    ei[stdev < jitter] = 0.0
+
+    cdf = norm.cdf(z)
+    pi = cdf
+
+    dim = len(obj.domain.columns.values)
+    iters = len(obj.results)
+    beta = np.sqrt(2 * np.log(dim * iters ** 2 * math.pi ** 2 / (6 * delta)))
+    lcb = mean - beta * stdev
+
+    log_ei = np.log(1e-40 + ei)
+    log_pi = np.log(1e-40+pi)
+
+    return [lcb[0], -1*log_ei[0], -1*log_pi[0]]
+
+class MACE:
+    def __init__(self, acq_function, batch_size, duplicates):
+        """
+        Parameters
+        ----------
+        acq_function : acq_func.function
+            Base acquisition function to use with Kriging believer algorithm.
+        batch_size : int
+            Number of points to select.
+        duplicates : bool
+            Select duplicate domain points.
+
+        """
+        self.acq_function = acq_function
+        self.batch_size = batch_size
+        self.duplicates = duplicates
+        self.jitter = 0.01
+
+    def run(self, model, obj):
+        """Run MACE algorithm on a trained model and user defined domain.
+
+        Parameters
+        ----------
+        model : edbo.models
+            Trained model to be sampled.
+        obj : edbo.objective
+            Objective object containing information about the domain.
+
+        Returns
+        ----------
+        pandas.DataFrame
+            Selected domain points.
+        """
+
+        # Make a copy of model dictionary
+        model_dict = model.__dict__.copy()
+        for entry in ['X', 'y']:
+            del (model_dict[entry])
+
+        # Save a copy of GP hyperparameters
+        if 'GP' in str(model) and 'Linear' not in str(model):
+            post_ls = model.model.covar_module.base_kernel.lengthscale.clone()
+            post_os = model.model.covar_module.outputscale.clone()
+            post_n = model.model.likelihood.noise.clone()
+
+        # Get choices via the Kriging believer algorithm
+        proposed = pd.DataFrame(columns=obj.domain.columns)
+        beliefs = []
+        self.projections = []
+        self.projection_means = []
+        for i in range(self.batch_size):
+
+            # Run acquisition function
+            next_acq = self.acq_function(model, obj, jitter=self.jitter)
+
+            # Log projections and model predictions
+            self.projections.append(next_acq)
+            fant = model.predict(to_torch(obj.domain, gpu=obj.gpu))
+            self.projection_means.append(obj.scaler.unstandardize(fant))
+
+            # De-duplication
+            if self.duplicates == False:
+                next_df = obj.domain.copy()
+                next_df['sample'] = next_acq
+
+                known_X = pd.concat([
+                    obj.results.drop(obj.target, axis=1),
+                    proposed],
+                    sort=False
+                )
+
+                argmax_i = argmax(next_df,
+                                  known_X,
+                                  duplicates=self.duplicates)
+                proposed_i = argmax_i.drop('sample', axis=1)
+
+            else:
+                proposed_i = pd.DataFrame(
+                    data=obj.domain.iloc[[np.argmax(next_acq)]],
+                    columns=obj.domain.columns)
+
+            proposed = pd.concat([proposed, proposed_i], sort=False)
+
+            # Get predictions
+            pred_i = model.predict(to_torch(proposed_i, gpu=obj.gpu))
+            beliefs.append(pred_i[0])
+
+            pred = proposed.copy()
+            pred[obj.target] = beliefs
+
+            # Append to results
+            results_believer = pd.concat(
+                [obj.results.copy(), pred],
+                sort=False)
+
+            # Reinitialize model
+            X = to_torch(results_believer.drop(obj.target, axis=1),
+                         gpu=obj.gpu)
+            y = to_torch(results_believer[obj.target], gpu=obj.gpu)
+            del (model.__dict__)
+
+            # Cholskey issues durring training
+            try:
+                model.__init__(X, y)
+
+                # Update dictionaries
+                for key in model_dict:
+                    model.__dict__[key] = model_dict.copy()[key]
+                model.model.train_inputs = (X,)
+                model.model.train_targets = y
+
+                # Fit model
+                model.fit()
+
+            except Exception as e:
+                print(e)
+                print('edbo bot: Defaulting to previous iterations hyperparameters...')
+                del (model.__dict__)
+                model.__init__(X, y)
+
+                # Update dictionaries
+                for key in model_dict:
+                    model.__dict__[key] = model_dict.copy()[key]
+                model.model.train_inputs = (X,)
+                model.model.train_targets = y
+
+                if 'GP' in str(model):
+                    model.model.covar_module.base_kernel.lengthscale = post_ls
+                    model.model.covar_module.outputscale = post_os
+                    model.model.likelihood.noise = post_n
+
+                # Fit model
+                model.training_iters = 0
+                model.fit()
+
+        # Refit model with origional data
+        model.__init__(obj.X, obj.y)
+        for key in model_dict:
+            model.__dict__[key] = model_dict.copy()[key]
+        model.model.train_inputs = (obj.X,)
+        model.model.train_targets = obj.y
+        model.fit()
+
+        return proposed
+
 # Batching via Kriging believer
 
 class Kriging_believer:
