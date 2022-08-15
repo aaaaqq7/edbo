@@ -7,6 +7,13 @@ import numpy as np
 from scipy.stats import norm
 import math
 from random import sample as random_sample
+from pymoo.core.problem import ElementwiseProblem
+from pymoo.algorithms.moo.nsga2 import NSGA2
+from pymoo.operators.crossover.sbx import SBX
+from pymoo.operators.mutation.pm import PM
+from pymoo.operators.sampling.rnd import FloatRandomSampling
+from pymoo.optimize import minimize
+from pymoo.termination import get_termination
 
 from .pd_utils import to_torch, join_to_df, argmax, complement, sample, torch_to_numpy
 
@@ -24,7 +31,7 @@ class acquisition:
         Parameters
         ----------
         function : str
-            Acquisition function to be used. Options include: 'TS', 'EI', 'PI'
+            Acquisition function to be used. Options include: 'TS', 'EI', 'PI', 'MACE'
             'UCB', 'EI-TS', 'PI-TS', 'UCB-TS', 'rand-TS', 'MeanMax-TS',
             'VarMax-TS', 'MeanMax', 'VarMax', 'rand', and 'eps-greedy'.
         batch_size : int
@@ -44,6 +51,11 @@ class acquisition:
             self.function = Kriging_believer(probability_of_improvement, 
                                              batch_size, 
                                              duplicates)
+        elif function.lower() == 'mace':
+            self.function = Mace(multi_obj_acq,
+                                 batch_size,
+                                 duplicates)
+
         elif function.lower() == 'ucb':
             self.function = Kriging_believer(upper_confidence_bound, 
                                              batch_size, 
@@ -471,6 +483,8 @@ def lower_confidence_bound(model, obj, jitter=1e-2, delta=0.5):
     return mean - beta * stdev
 
 def multi_obj_acq(model, obj, jitter=1e-2, delta=0.5):
+    ub = obj.domain.max().to_numpy(dtype='float64')
+    lb = obj.domain.min().to_numpy(dtype='float64')
     domain = to_torch(obj.domain, gpu=obj.gpu)
     if len(obj.results) == 0:
         max_observed = 0
@@ -496,9 +510,21 @@ def multi_obj_acq(model, obj, jitter=1e-2, delta=0.5):
     log_ei = np.log(1e-40 + ei)
     log_pi = np.log(1e-40+pi)
 
-    return [lcb[0], -1*log_ei[0], -1*log_pi[0]]
+    return [lcb[0], -1*log_ei[0], -1*log_pi[0], lb, ub]
 
-class MACE:
+
+
+
+class MyProblem(ElementwiseProblem):
+    def __init__(self, lb, ub, input_data):
+        super().__init__(n_var=len(lb), xl=lb, xu=ub, n_obj=3, n_constr=0)
+        self.moo_data = input_data
+
+    def _evaluate(self, x, out, *args, **kwargs):
+
+        out["F"] = self.moo_data
+
+class Mace:
     def __init__(self, acq_function, batch_size, duplicates):
         """
         Parameters
@@ -552,6 +578,20 @@ class MACE:
 
             # Run acquisition function
             next_acq = self.acq_function(model, obj, jitter=self.jitter)
+            lb = next_acq[3]
+            ub = next_acq[4]
+            prob = MyProblem(lb, ub, next_acq[0:3])
+            algo = NSGA2(
+                pop_size=792,
+                n_offsprings=10,
+                sampling=FloatRandomSampling(),
+                crossover=SBX(prob=0.9, eta=15),
+                mutation=PM(eta=20),
+                eliminate_duplicates=True
+            )
+            termination = get_termination("n_gen", 100)
+            res = minimize(prob, algo, termination, verbose=True)
+            next_acq = res.X
 
             # Log projections and model predictions
             self.projections.append(next_acq)
