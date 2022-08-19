@@ -7,7 +7,7 @@ import numpy as np
 from scipy.stats import norm
 import math
 from random import sample as random_sample
-from pymoo.core.problem import ElementwiseProblem
+from pymoo.core.problem import Problem
 from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.operators.crossover.sbx import SBX
 from pymoo.operators.mutation.pm import PM
@@ -510,12 +510,12 @@ def multi_obj_acq(model, obj, jitter=1e-2, delta=0.5):
     log_ei = np.log(1e-40 + ei)
     log_pi = np.log(1e-40+pi)
 
-    return [lcb[0], -1*log_ei[0], -1*log_pi[0], lb, ub]
+    return [lcb, -1*log_ei, -1*log_pi, lb, ub]
 
 
 
 
-class MyProblem(ElementwiseProblem):
+class MyProblem(Problem):
     def __init__(self, lb, ub, input_data):
         super().__init__(n_var=len(lb), xl=lb, xu=ub, n_obj=3, n_constr=0)
         self.moo_data = input_data
@@ -583,15 +583,16 @@ class Mace:
             prob = MyProblem(lb, ub, next_acq[0:3])
             algo = NSGA2(
                 pop_size=792,
-                n_offsprings=10,
+                n_offsprings=792,
                 sampling=FloatRandomSampling(),
                 crossover=SBX(prob=0.9, eta=15),
                 mutation=PM(eta=20),
                 eliminate_duplicates=True
             )
             termination = get_termination("n_gen", 100)
-            res = minimize(prob, algo, termination, verbose=True)
-            next_acq = res.X
+            res = minimize(prob, algo, termination, verbose=False)
+
+            next_acq = np.average(res.X, axis=1)
 
             # Log projections and model predictions
             self.projections.append(next_acq)
