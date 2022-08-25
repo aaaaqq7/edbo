@@ -612,6 +612,23 @@ class Random:
     
     def predict(self, points):
         return None
+
+
+import os
+
+import matplotlib.pyplot as plt
+from botorch import fit_fully_bayesian_model_nuts
+from botorch.acquisition import qExpectedImprovement
+from botorch.models.fully_bayesian import SaasFullyBayesianSingleTaskGP
+from botorch.models.transforms import Standardize
+from botorch.optim import optimize_acqf
+from botorch.test_functions import Branin
+from torch.quasirandom import SobolEngine
+
+class Saas:
+    def __init__(self, X, y, warmup_steps=512, num_samples=256, ):
+
+
         
 # Score model performance
         
@@ -699,7 +716,6 @@ def cross_validate(base_model, X, y, kfold=5, random_state=None, **kwargs):
     
     
     
-    
-    
+
     
     

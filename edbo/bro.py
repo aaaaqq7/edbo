@@ -36,7 +36,7 @@ class BO:
                  results_path=None, results=pd.DataFrame(),
                  domain_path=None, domain=pd.DataFrame(),
                  exindex_path=None, exindex=pd.DataFrame(),
-                 model=GP_Model, acquisition_function='MACE', init_method='rand',
+                 model=GP_Model, acquisition_function='EI', init_method='rand',
                  target=-1, batch_size=5, duplicate_experiments=False, 
                  gpu=False, fast_comp=False, noise_constraint=1e-5,
                  matern_nu=2.5, lengthscale_prior=[GammaPrior(2.0, 0.2), 5.0],
@@ -908,4 +908,5 @@ class BO_express(BO):
                                          print_dict,
                                          confirm_dict)
         
-    
+
+
